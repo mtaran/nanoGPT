@@ -30,10 +30,11 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0
+        self.n_mha_chan = config.n_mha_chan
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.c_attn = nn.ModuleList([nn.Linear(config.n_embd // self.n_mha_chan, 3 * config.n_embd // self.n_mha_chan, bias=config.bias) for _ in range(self.n_mha_chan)])
         # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj = nn.ModuleList([nn.Linear(config.n_embd // self.n_mha_chan, config.n_embd // self.n_mha_chan, bias=config.bias) for _ in range(self.n_mha_chan)])
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
@@ -45,20 +46,23 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        xs = torch.chunk(x, self.n_mha_chan, dim=-1)  # split along the last dimension
+        ys = []
+        for i in range(self.n_mha_chan):
+            q, k, v  = self.c_attn[i](xs[i]).split(self.n_embd // self.n_mha_chan, dim=2)
+            k = k.view(B, T, self.n_head // self.n_mha_chan, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+            q = q.view(B, T, self.n_head // self.n_mha_chan, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+            v = v.view(B, T, self.n_head // self.n_mha_chan, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        # efficient attention using Flash Attention CUDA kernels
-        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+            # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+            # efficient attention using Flash Attention CUDA kernels
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = y.transpose(1, 2).contiguous().view(B, T, C // self.n_mha_chan) # re-assemble all head outputs side by side
 
-        # output projection
-        y = self.resid_dropout(self.c_proj(y))
-        return y
-
+            # output projection
+            y = self.resid_dropout(self.c_proj[i](y))
+            ys.append(y)
+        return torch.cat(ys, dim=-1)  # concatenate along the last dimension
 class MLP(nn.Module):
     """Expands the dimension by 4x internally."""
     def __init__(self, config: GPTConfig):
@@ -100,6 +104,7 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_mlp_chan: int = 12
+    n_mha_chan: int = 12
     n_embd: int = 768 # Residual stream dimensionality
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
