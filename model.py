@@ -111,7 +111,7 @@ class GPTConfig:
     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
     n_head: int = 12
-    n_embd: int = 768
+    n_embd: int = 768 # Residual stream dimensionality
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
@@ -228,7 +228,7 @@ class GPT(nn.Module):
             print(f"overriding dropout rate to {override_args['dropout']}")
             config_args['dropout'] = override_args['dropout']
         # create a from-scratch initialized minGPT model
-        config = GPTConfig(**config_args)
+        config = GPTConfig(**config_args) # type: ignore
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
@@ -236,7 +236,7 @@ class GPT(nn.Module):
 
         # init a huggingface/transformers model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
-        sd_hf = model_hf.state_dict()
+        sd_hf = model_hf.state_dict() # type: ignore
 
         # copy while ensuring all of the parameters are aligned and match in names and shapes
         sd_keys_hf = sd_hf.keys()
