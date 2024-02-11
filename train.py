@@ -52,9 +52,9 @@ batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch si
 block_size = 1024
 # model
 n_layer = 12
-n_head = 12
-n_mlp_chan = 12
-n_mha_chan = 12
+n_heads = 12
+n_chans = 12
+n_chans = 12
 n_global = 12*16
 n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
@@ -77,6 +77,8 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+use_jit = False
+use_profiler = False
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -148,9 +150,8 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(
     n_layer=n_layer, 
-    n_head=n_head, 
-    n_mlp_chan=n_mlp_chan,
-    n_mha_chan=n_mha_chan,
+    n_heads=n_heads, 
+    n_chans=n_chans,
     n_global=n_global,
     n_embd=n_embd, 
     block_size=block_size,
@@ -166,7 +167,12 @@ if init_from == 'scratch':
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
     gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
+    if use_jit:
+        print("Starting jit scripting...")
+        model = torch.jit.script(GPT(gptconf))
+        print("Jit scripting done.")
+    else:
+        model = GPT(gptconf)
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
@@ -175,7 +181,7 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+    for k in ['n_layer', 'n_heads', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)
@@ -196,10 +202,10 @@ elif init_from.startswith('gpt2'):
     override_args = dict(dropout=dropout)
     model = GPT.from_pretrained(init_from, override_args)
     # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+    for k in ['n_layer', 'n_heads', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = getattr(model.config, k)
 # crop down the model block size if desired, using model surgery
-if block_size < model.config.block_size:
+if block_size < model.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
@@ -220,9 +226,7 @@ def log(*args, **kwargs):
 if compile:
     log("compiling the model... (takes a ~minute)")
     unoptimized_model = model
-    model = torch.compile(model) # requires PyTorch 2.0
-
-log("Compiling done!")
+    model = torch.compile(model, fullgraph=True) # requires PyTorch 2.0
 
 # wrap model into DDP container
 if ddp:
@@ -270,10 +274,11 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 
-with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        profile_memory=True, record_shapes=True) as prof:
-    while True:
+torch.backends.cudnn.benchmark = True
 
+
+def main():
+    while True:
         # determine and set the learning rate for this iteration
         lr = get_lr(iter_num) if decay_lr else learning_rate
         for param_group in optimizer.param_groups:
@@ -350,7 +355,7 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
             lossf = loss.item() * gradient_accumulation_steps
             if local_iter_num >= 5: # let the training loop settle a bit
-                mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+                mfu = raw_model.estimate_mfu(gptconf, batch_size * gradient_accumulation_steps, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
             log(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
         iter_num += 1
@@ -360,9 +365,20 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
         if iter_num > max_iters:
             break
 # prof.export_chrome_trace("trace.json")
-print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
-print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-print(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
+
+if use_profiler:
+    with profile(
+        # profile_memory=True, 
+        # record_shapes=True,
+        # with_stack=True,
+    ) as prof:
+        main()
+    
+    print(prof.key_averages(group_by_stack_n=10, group_by_input_shape=True).table(sort_by="cpu_time_total", row_limit=10))
+    print(prof.key_averages(group_by_stack_n=10, group_by_input_shape=True).table(sort_by="cuda_time_total", row_limit=10))
+    print(prof.key_averages(group_by_stack_n=10, group_by_input_shape=True).table(sort_by="self_cpu_memory_usage", row_limit=10))
+else:
+    main()
 
 if ddp:
     destroy_process_group()

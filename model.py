@@ -14,8 +14,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.profiler import profile, record_function, ProfilerActivity
 from torch.backends.cuda import sdp_kernel
+from torch import jit
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -29,65 +29,54 @@ class LayerNorm(nn.Module):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config, width: int, n_heads: int):
         super().__init__()
-        assert config.n_embd % config.n_head == 0
-        self.n_mha_chan = config.n_mha_chan
-
-        chan_dim = config.n_embd // self.n_mha_chan
+        assert width % n_heads == 0
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.ModuleList([nn.Linear(chan_dim, 3 * chan_dim, bias=config.bias) for _ in range(self.n_mha_chan)])
+        self.c_attn = nn.Linear(width, 3 * width, bias=config.bias)
         # output projection
-        self.c_proj = nn.ModuleList([nn.Linear(chan_dim, chan_dim, bias=config.bias) for _ in range(self.n_mha_chan)])
+        self.c_proj = nn.Linear(width, width, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
+        self.n_heads = n_heads
+        self.n_embd = width
         self.dropout = config.dropout
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        xs = torch.chunk(x, self.n_mha_chan, dim=-1)  # split along the last dimension
-        ys = []
-        for i in range(self.n_mha_chan):
-            q, k, v  = self.c_attn[i](xs[i]).split(self.n_embd // self.n_mha_chan, dim=2)
-            k = k.view(B, T, self.n_head // self.n_mha_chan, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-            q = q.view(B, T, self.n_head // self.n_mha_chan, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-            v = v.view(B, T, self.n_head // self.n_mha_chan, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_heads, C // self.n_heads).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_heads, C // self.n_heads).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_heads, C // self.n_heads).transpose(1, 2) # (B, nh, T, hs)
 
-            # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        # Lol, using the context manager breaks compilation!
+        # with sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
             # efficient attention using Flash Attention CUDA kernels
-            with sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
-                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-            y = y.transpose(1, 2).contiguous().view(B, T, C // self.n_mha_chan) # re-assemble all head outputs side by side
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
-            # output projection
-            y = self.resid_dropout(self.c_proj[i](y))
-            ys.append(y)
-        return torch.cat(ys, dim=-1)  # concatenate along the last dimension
+        # output projection
+        y = self.resid_dropout(self.c_proj(y))
+        return y
+
 class MLP(nn.Module):
-    """Expands the dimension by 4x internally."""
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig, width: int):
         super().__init__()
-        self.n_mlp_chan = config.n_mlp_chan
-        self.c_fc    = nn.ModuleList([nn.Linear(config.n_embd // self.n_mlp_chan, 4 * config.n_embd // self.n_mlp_chan, bias=config.bias) for _ in range(self.n_mlp_chan)])
+        self.c_fc    = nn.Linear(width, 4 * width, bias=config.bias)
         self.gelu    = nn.GELU()
-        self.c_proj  = nn.ModuleList([nn.Linear(4 * config.n_embd // self.n_mlp_chan, config.n_embd // self.n_mlp_chan, bias=config.bias) for _ in range(self.n_mlp_chan)])
+        self.c_proj  = nn.Linear(4 * width, width, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        xs = torch.chunk(x, self.n_mlp_chan, dim=-1)  # split along the last dimension
-        ys = []
-        for i in range(self.n_mlp_chan):
-            y = self.c_fc[i](xs[i])
-            y = self.gelu(y)
-            y = self.c_proj[i](y)
-            y = self.dropout(y)
-            ys.append(y)
-        return torch.cat(ys, dim=-1)  # concatenate along the last dimension
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
 
 class GlobalBottleneck(nn.Module):
     """Allows channels to talk to each other a little bit.
@@ -95,59 +84,68 @@ class GlobalBottleneck(nn.Module):
     Specifically:
     1. Each channel gets reduced to a smaller size, with a non-linearity applied.
     2. The reduced channels are all concatenated together, making a global state.
-    3. The global state is concatenated back onto each channel, and these combined states each go through an MLP.
-    4. The results are concatenated and sent out.
+    3. This global state is expanded to 4x total residual stream size, with chunks adding to an otherwise channel-wise MLP.
     """
     def __init__(self, config: GPTConfig):
         super().__init__()
-        assert config.n_embd % config.n_mlp_chan == 0, "n_embd must be divisible by n_mlp_chan"
-        assert config.n_global % config.n_mlp_chan == 0, "n_global must be divisible by n_mlp_chan"
-        self.n_mlp_chan = config.n_mlp_chan
-        chan_dim = config.n_embd // self.n_mlp_chan
-        self.reduce = nn.ModuleList([nn.Linear(chan_dim, config.n_global // self.n_mlp_chan, bias=config.bias) for _ in range(self.n_mlp_chan)])
-        global_chan_dim = chan_dim + config.n_global
-        self.expand = nn.ModuleList([nn.Linear(global_chan_dim, 4 * global_chan_dim, bias=config.bias) for _ in range(self.n_mlp_chan)])
+        assert config.n_embd % config.n_chans == 0, "n_embd must be divisible by n_chans"
+        assert config.n_global % config.n_chans == 0, "n_global must be divisible by n_chans"
+        n_chans = config.n_chans
+        chan_dim = config.n_embd // n_chans
+        self.reduce = nn.ModuleList([nn.Linear(chan_dim, config.n_global // n_chans, bias=config.bias) for _ in range(n_chans)])
+        self.global_comms = nn.ModuleList([nn.Linear(config.n_global, 4 * chan_dim, bias=config.bias) for _ in range(n_chans)])
+        self.expand = nn.ModuleList([nn.Linear(chan_dim, 4 * chan_dim, bias=config.bias) for _ in range(n_chans)])
         self.gelu = nn.GELU()
-        self.reduce_final = nn.ModuleList([nn.Linear(4 * global_chan_dim, chan_dim, bias=config.bias) for _ in range(self.n_mlp_chan)])
+        self.reduce_final = nn.ModuleList([nn.Linear(4 * chan_dim, chan_dim, bias=config.bias) for _ in range(n_chans)])
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        xs = torch.chunk(x, self.n_mlp_chan, dim=-1)  # split along the last dimension
-        reduced = [self.gelu(self.reduce[i](xs[i])) for i in range(self.n_mlp_chan)]  # reduce each channel
-        global_state = torch.cat(reduced, dim=-1)  # concatenate reduced channels to form a global state
-        # expand each channel state concatenated with the global state
-        reduced_final = []
-        for i in range(self.n_mlp_chan):
-            combined = torch.cat([xs[i], global_state], dim=-1)
-            y = self.expand[i](combined)
+    def forward(self, xs: list[torch.Tensor]) -> list[torch.Tensor]:
+        pieces = []
+        for i, reduce in enumerate(self.reduce):
+            y = reduce(xs[i])
             y = self.gelu(y)
-            y = self.reduce_final[i](y)
-            reduced_final.append(y)
-        return torch.cat(reduced_final, dim=-1)
+            pieces.append(y)
+        global_state = torch.cat(pieces, dim=-1)
+        out = []
+        for i, (expand, global_comm, reduce_final) in enumerate(zip(self.expand, self.global_comms, self.reduce_final)):
+            y = expand(xs[i]) + global_comm(global_state)
+            y = self.gelu(y)
+            y = reduce_final(y)
+            out.append(y)
+        return out
 
 class Block(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
-        self.ln_3 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        n_chans = config.n_chans
+        self.channels = nn.ModuleList([ChannelBlock(config, config.n_embd // n_chans, config.n_heads // n_chans) for _ in range(n_chans)])
         self.global_bottleneck = GlobalBottleneck(config)
+
+    def forward(self, xs: list[torch.Tensor]) -> list[torch.Tensor]:
+        xs = [channel(xs[i]) for i, channel in enumerate(self.channels)]
+        xs = [xs[i] + g for i, g in enumerate(self.global_bottleneck(xs))]
+        return xs
+
+class ChannelBlock(nn.Module):
+    def __init__(self, config: GPTConfig, width: int, n_heads: int):
+        super().__init__()
+        self.ln_1 = LayerNorm(width, bias=config.bias)
+        self.attn = CausalSelfAttention(config, width, n_heads)
+        self.ln_2 = LayerNorm(width, bias=config.bias)
+        self.mlp = MLP(config, width)
+        self.ln_3 = LayerNorm(width, bias=config.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
-        x = x + self.global_bottleneck(self.ln_3(x))
-        return x
+        return self.ln_3(x)
 
 @dataclass
 class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
-    n_head: int = 12
-    n_mlp_chan: int = 12
-    n_mha_chan: int = 12
+    n_heads: int = 12
+    n_chans: int = 12
     n_global: int = 192
     n_embd: int = 768 # Residual stream dimensionality
     dropout: float = 0.0
@@ -158,7 +156,8 @@ class GPT(nn.Module):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
-        self.config = config
+        self.block_size = config.block_size
+        self.n_chans = config.n_chans
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -184,6 +183,7 @@ class GPT(nn.Module):
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
+    @jit.ignore
     def get_num_params(self, non_embedding=True):
         """
         Return the number of parameters in the model.
@@ -207,16 +207,18 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
+        xs = torch.chunk(x, self.n_chans, dim=-1)  # split along the last dimension
+
         for block in self.transformer.h:
-            x = block(x)
-        x = self.transformer.ln_f(x)
+            xs = block(xs)
+        x = self.transformer.ln_f(torch.cat(xs, dim=-1))
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
@@ -249,12 +251,12 @@ class GPT(nn.Module):
         from transformers import GPT2LMHeadModel
         print("loading weights from pretrained gpt: %s" % model_type)
 
-        # n_layer, n_head and n_embd are determined from model_type
+        # n_layer, n_heads and n_embd are determined from model_type
         config_args = {
-            'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
-            'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
-            'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
-            'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
+            'gpt2':         dict(n_layer=12, n_heads=12, n_embd=768),  # 124M params
+            'gpt2-medium':  dict(n_layer=24, n_heads=16, n_embd=1024), # 350M params
+            'gpt2-large':   dict(n_layer=36, n_heads=20, n_embd=1280), # 774M params
+            'gpt2-xl':      dict(n_layer=48, n_heads=25, n_embd=1600), # 1558M params
         }[model_type]
         print("forcing vocab_size=50257, block_size=1024, bias=True")
         config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
@@ -297,6 +299,7 @@ class GPT(nn.Module):
 
         return model
 
+    @jit.ignore
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -323,13 +326,13 @@ class GPT(nn.Module):
 
         return optimizer
 
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
+    @jit.ignore
+    def estimate_mfu(self, cfg: GPTConfig, fwdbwd_per_iter, dt):
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
-        cfg = self.config
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+        L, H, Q, T = cfg.n_layer, cfg.n_heads, cfg.n_embd//cfg.n_heads, cfg.block_size
         flops_per_token = 6*N + 12*L*H*Q*T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter

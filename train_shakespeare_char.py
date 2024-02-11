@@ -2,7 +2,7 @@
 # good for debugging and playing on macbooks and such
 
 out_dir = 'out-shakespeare-char'
-eval_interval = 250 # keep frequent because we'll overfit
+eval_interval = 100 # keep frequent because we'll overfit
 eval_iters = 20
 log_interval = 10 # don't print too too often
 
@@ -13,16 +13,15 @@ wandb_log = True
 wandb_project = 'shakespeare-char'
 
 dataset = ''
-gradient_accumulation_steps = 1
+gradient_accumulation_steps = 2
 batch_size = 64*4
 block_size = 256 # context of up to 256 previous characters
 
 # baby GPT model :)
-n_layer = 6
-n_head = 6*2
-n_mlp_chan = n_head
-n_mha_chan = n_head
-n_global = n_head*8
+n_layer = 8
+n_heads = 6*2
+n_chans = n_heads
+n_global = n_heads*16
 n_embd = 576
 dropout = 0.2
 
