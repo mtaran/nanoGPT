@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.profiler import profile, record_function, ProfilerActivity
+from torch.backends.cuda import sdp_kernel
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -31,10 +33,12 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         self.n_mha_chan = config.n_mha_chan
+
+        chan_dim = config.n_embd // self.n_mha_chan
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.ModuleList([nn.Linear(config.n_embd // self.n_mha_chan, 3 * config.n_embd // self.n_mha_chan, bias=config.bias) for _ in range(self.n_mha_chan)])
+        self.c_attn = nn.ModuleList([nn.Linear(chan_dim, 3 * chan_dim, bias=config.bias) for _ in range(self.n_mha_chan)])
         # output projection
-        self.c_proj = nn.ModuleList([nn.Linear(config.n_embd // self.n_mha_chan, config.n_embd // self.n_mha_chan, bias=config.bias) for _ in range(self.n_mha_chan)])
+        self.c_proj = nn.ModuleList([nn.Linear(chan_dim, chan_dim, bias=config.bias) for _ in range(self.n_mha_chan)])
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
@@ -56,7 +60,8 @@ class CausalSelfAttention(nn.Module):
 
             # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            with sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
             y = y.transpose(1, 2).contiguous().view(B, T, C // self.n_mha_chan) # re-assemble all head outputs side by side
 
             # output projection
@@ -84,17 +89,55 @@ class MLP(nn.Module):
             ys.append(y)
         return torch.cat(ys, dim=-1)  # concatenate along the last dimension
 
+class GlobalBottleneck(nn.Module):
+    """Allows channels to talk to each other a little bit.
+    
+    Specifically:
+    1. Each channel gets reduced to a smaller size, with a non-linearity applied.
+    2. The reduced channels are all concatenated together, making a global state.
+    3. The global state is concatenated back onto each channel, and these combined states each go through an MLP.
+    4. The results are concatenated and sent out.
+    """
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        assert config.n_embd % config.n_mlp_chan == 0, "n_embd must be divisible by n_mlp_chan"
+        assert config.n_global % config.n_mlp_chan == 0, "n_global must be divisible by n_mlp_chan"
+        self.n_mlp_chan = config.n_mlp_chan
+        chan_dim = config.n_embd // self.n_mlp_chan
+        self.reduce = nn.ModuleList([nn.Linear(chan_dim, config.n_global // self.n_mlp_chan, bias=config.bias) for _ in range(self.n_mlp_chan)])
+        global_chan_dim = chan_dim + config.n_global
+        self.expand = nn.ModuleList([nn.Linear(global_chan_dim, 4 * global_chan_dim, bias=config.bias) for _ in range(self.n_mlp_chan)])
+        self.gelu = nn.GELU()
+        self.reduce_final = nn.ModuleList([nn.Linear(4 * global_chan_dim, chan_dim, bias=config.bias) for _ in range(self.n_mlp_chan)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        xs = torch.chunk(x, self.n_mlp_chan, dim=-1)  # split along the last dimension
+        reduced = [self.gelu(self.reduce[i](xs[i])) for i in range(self.n_mlp_chan)]  # reduce each channel
+        global_state = torch.cat(reduced, dim=-1)  # concatenate reduced channels to form a global state
+        # expand each channel state concatenated with the global state
+        reduced_final = []
+        for i in range(self.n_mlp_chan):
+            combined = torch.cat([xs[i], global_state], dim=-1)
+            y = self.expand[i](combined)
+            y = self.gelu(y)
+            y = self.reduce_final[i](y)
+            reduced_final.append(y)
+        return torch.cat(reduced_final, dim=-1)
+
 class Block(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.ln_3 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.global_bottleneck = GlobalBottleneck(config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
+        x = x + self.global_bottleneck(self.ln_3(x))
         return x
 
 @dataclass
@@ -105,6 +148,7 @@ class GPTConfig:
     n_head: int = 12
     n_mlp_chan: int = 12
     n_mha_chan: int = 12
+    n_global: int = 192
     n_embd: int = 768 # Residual stream dimensionality
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
