@@ -14,15 +14,15 @@ wandb_project = 'shakespeare-char'
 
 dataset = ''
 gradient_accumulation_steps = 2
-batch_size = 64*4
+batch_size = 64*3
 block_size = 256 # context of up to 256 previous characters
 
 # baby GPT model :)
-n_layer = 8
-n_heads = 6*2
-n_chans = n_heads
-n_global = n_heads*16
-n_embd = 576
+n_layer = 6
+n_groups = 8
+n_heads = n_groups*4
+n_global = n_groups*8
+n_embd = n_groups*128
 dropout = 0.2
 
 learning_rate = 1e-3 # with baby networks can afford to go a bit higher

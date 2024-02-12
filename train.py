@@ -53,8 +53,8 @@ block_size = 1024
 # model
 n_layer = 12
 n_heads = 12
-n_chans = 12
-n_chans = 12
+n_groups = 12
+n_groups = 12
 n_global = 12*16
 n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
@@ -151,7 +151,7 @@ if os.path.exists(meta_path):
 model_args = dict(
     n_layer=n_layer, 
     n_heads=n_heads, 
-    n_chans=n_chans,
+    n_groups=n_groups,
     n_global=n_global,
     n_embd=n_embd, 
     block_size=block_size,
@@ -278,6 +278,7 @@ torch.backends.cudnn.benchmark = True
 
 
 def main():
+    global iter_num, best_val_loss, running_mfu, X, Y, local_iter_num, t0
     while True:
         # determine and set the learning rate for this iteration
         lr = get_lr(iter_num) if decay_lr else learning_rate
