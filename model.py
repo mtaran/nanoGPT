@@ -194,7 +194,8 @@ class GPT(nn.Module):
             )
             if self.space_embedding:
                 space_logits = self.space_embedding(x).view(-1)
-                space_loss = F.cross_entropy(space_logits, (targets == 8192).long().view(-1), ignore_index=-1)
+                print('shapes:', space_logits.shape, targets.shape, targets.view(-1).shape)
+                space_loss = F.cross_entropy(space_logits, (targets >= 8192).long().view(-1), ignore_index=-1)
                 loss += space_loss/12
                 logits = logits, space_logits
         else:
