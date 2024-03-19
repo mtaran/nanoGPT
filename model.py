@@ -125,14 +125,17 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
 
-        self.transformer = nn.ModuleDict(dict(
+        d = dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
-            spe = nn.Embedding(1, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
-        ))
+        )
+        if config.space_encoding:
+            d['spe'] = nn.Embedding(1, config.n_embd)
+
+        self.transformer = nn.ModuleDict()
         self.out_bottleneck = nn.Linear(config.n_embd, config.n_outb, bias=False)
         self.lm_head = nn.Linear(config.n_outb, config.vocab_size, bias=False)
         self.space_embedding = nn.Linear(config.n_embd, 1) if config.space_encoding else None
@@ -141,7 +144,8 @@ class GPT(nn.Module):
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
         # self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
-        self.transformer.spe.weight = self.space_embedding.weight if self.space_embedding is not None else None
+        if self.space_embedding is not None:
+            self.transformer.spe.weight = self.space_embedding.weight
 
         # init all weights
         self.apply(self._init_weights)
