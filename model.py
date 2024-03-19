@@ -135,7 +135,7 @@ class GPT(nn.Module):
         if config.space_encoding:
             d['spe'] = nn.Embedding(1, config.n_embd)
 
-        self.transformer = nn.ModuleDict()
+        self.transformer = nn.ModuleDict(d)
         self.out_bottleneck = nn.Linear(config.n_embd, config.n_outb, bias=False)
         self.lm_head = nn.Linear(config.n_outb, config.vocab_size, bias=False)
         self.space_embedding = nn.Linear(config.n_embd, 1) if config.space_encoding else None
