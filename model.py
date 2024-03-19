@@ -112,6 +112,7 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
+    n_outb: int = 16 # size of the output bottleneck
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     space_encoding: bool = False # True to use 8192 as a sentinel to add learned space embedding to the token embeddings
@@ -132,13 +133,14 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.out_bottleneck = nn.Linear(config.n_embd, config.n_outb, bias=False)
+        self.lm_head = nn.Linear(config.n_outb, config.vocab_size, bias=False)
         self.space_embedding = nn.Linear(config.n_embd, 1) if config.space_encoding else None
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+        # self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
         self.transformer.spe.weight = self.space_embedding.weight if self.space_embedding is not None else None
 
         # init all weights
@@ -187,7 +189,7 @@ class GPT(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
+            logits = self.lm_head(self.out_bottleneck(x))
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 (targets % 8192 if self.space_embedding else targets).view(-1), ignore_index=-1,
