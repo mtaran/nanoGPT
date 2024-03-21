@@ -144,8 +144,8 @@ class GPT(nn.Module):
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
         # self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
-        if self.space_embedding is not None:
-            self.transformer.spe.weight = self.space_embedding.weight
+        # if self.space_embedding is not None:
+        #     self.transformer.spe.weight = self.space_embedding.weight
 
         # init all weights
         self.apply(self._init_weights)
@@ -193,15 +193,17 @@ class GPT(nn.Module):
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
+            bottleneck = self.out_bottleneck(x) if self.config.n_outb != self.config.n_embd else x
             logits = self.lm_head(self.out_bottleneck(x)) if self.config.n_outb != self.config.n_embd else self.lm_head(x)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 (targets % 8192 if self.space_embedding else targets).view(-1), ignore_index=-1,
             )
             if self.space_embedding:
-                space_logits = self.space_embedding(x).view(-1)
+                space_logits = self.space_embedding(bottleneck).view(-1)
                 print('shapes:', space_logits.shape, targets.shape, targets.view(-1).shape)
-                space_loss = F.cross_entropy(space_logits, (targets >= 8192).long().view(-1), ignore_index=-1)
+                binary_targets = (targets >= 8192).float().view(-1)
+                space_loss = nn.BCEWithLogitsLoss()(space_logits, binary_targets)
                 loss += space_loss/12
                 logits = logits, space_logits
         else:
