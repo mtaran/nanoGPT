@@ -138,7 +138,7 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(d)
         self.out_bottleneck = nn.Linear(config.n_embd, config.n_outb, bias=False)
         self.lm_head = nn.Linear(config.n_outb, config.vocab_size, bias=False)
-        self.space_embedding = nn.Linear(config.n_embd, 1) if config.space_encoding else None
+        self.space_embedding = nn.Linear(config.n_outb, 1) if config.space_encoding else None
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
