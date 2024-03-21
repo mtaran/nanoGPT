@@ -139,13 +139,6 @@ class GPT(nn.Module):
         self.out_bottleneck = nn.Linear(config.n_embd, config.n_outb, bias=False)
         self.lm_head = nn.Linear(config.n_outb, config.vocab_size, bias=False)
         self.space_embedding = nn.Linear(config.n_outb, 1) if config.space_encoding else None
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        # self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
-        # if self.space_embedding is not None:
-        #     self.transformer.spe.weight = self.space_embedding.weight
 
         # init all weights
         self.apply(self._init_weights)
@@ -185,9 +178,11 @@ class GPT(nn.Module):
 
         # forward the GPT model itself
         print(f'idx shape: {idx.shape}, wte shape: {self.transformer.wte.weight.shape}, pos shape: {pos.shape}')
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        tok_emb = self.transformer.wte(idx % 8192) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        # spc_emb uses the space_embedding for tokens >= 8192, 0 otherwise
+        spc_emb = self.space_embedding((idx // 8192).unsqueeze(-1)) if self.space_embedding is not None else torch.zeros_like(tok_emb)
+        x = self.transformer.drop(tok_emb + pos_emb + spc_emb)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
