@@ -177,10 +177,10 @@ class GPT(nn.Module):
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
-        print(f'idx shape: {idx.shape}, wte shape: {self.transformer.wte.weight.shape}, pos shape: {pos.shape}')
         tok_emb = self.transformer.wte(idx % 8192) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         spc_emb = self.transformer.spe((idx // 8192).unsqueeze(-1)) if self.space_embedding is not None else torch.zeros_like(tok_emb)
+        print(f'tok_emb shape: {tok_emb.shape}, pos_emb shape: {pos_emb.shape}, spc_emb shape: {spc_emb.shape}')
         x = self.transformer.drop(tok_emb + pos_emb + spc_emb)
         for block in self.transformer.h:
             x = block(x)
