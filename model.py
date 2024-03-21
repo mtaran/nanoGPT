@@ -201,7 +201,7 @@ class GPT(nn.Module):
             )
             if self.space_embedding:
                 space_logits = self.space_embedding(bottleneck).view(-1)
-                print('shapes:', space_logits.shape, targets.shape, targets.view(-1).shape)
+                # print('shapes:', space_logits.shape, targets.shape, targets.view(-1).shape)
                 binary_targets = (targets >= 8192).float().view(-1)
                 space_loss = nn.BCEWithLogitsLoss()(space_logits, binary_targets)
                 loss += space_loss/12
