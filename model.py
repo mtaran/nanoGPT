@@ -252,7 +252,10 @@ class GPT(nn.Module):
         # print(f'tok_emb shape: {tok_emb.shape}, pos_emb shape: {pos_emb.shape}, spc_emb shape: {spc_emb.shape}')
         x = self.transformer.drop(tok_emb + pos_emb + spc_emb)
         for block in self.transformer.h:
-            x = block(x)
+            x2 = block(x)
+            if torch.isnan(x2).any():
+                raise ValueError(f"x2 is nan! max x: {x.max()}, min x: {x.min()}")
+            x = x2
         x = self.transformer.ln_f(x)
 
         if targets is not None:
