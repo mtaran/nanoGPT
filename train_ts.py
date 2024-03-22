@@ -23,6 +23,8 @@ n_head = 6
 n_embd = 384
 dropout = 0.2
 
+bit_linear = True
+
 learning_rate = 1e-3 # with baby networks can afford to go a bit higher
 max_iters = 5000
 lr_decay_iters = 5000 # make equal to max_iters usually

@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Full definition of a GPT Language Model, all of it in this single file.
 References:
@@ -15,6 +16,69 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from torch.autograd import Function
+from torch import nn, Tensor
+import torch.nn.functional as F
+
+class AbsMeanFunction(Function):
+    @staticmethod
+    def forward(ctx, W: Tensor, eps=1e-6) -> Tensor:
+        gamma = W.abs().mean() + eps
+        W_scaled = W / gamma
+        W_quantized = W_scaled.sign() * torch.clamp(W_scaled.abs().round(), max=1.0)
+        # print(f"{W_quantized=}")
+        ctx.save_for_backward(W, W_quantized, W_scaled, gamma)
+        return W_quantized
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # print(f"{grad_output=}")
+        W, W_quantized, W_scaled, gamma = ctx.saved_tensors
+        grad_W = grad_output / gamma
+        return grad_W, None
+absmean = AbsMeanFunction.apply
+
+
+class BitLinear158(nn.Module):
+    """
+    BitLinear implements a fully connected layer with ternary weight quantization.
+    Weights are quantized to -1, 0, or +1 using an absmean quantization approach.
+    """
+
+    def __init__(self, in_features, out_features, bias=False):
+        """
+        Initializes the BitLinear layer.
+
+        Args:
+            in_features (int): Number of input features.
+            out_features (int): Number of output features.
+        """
+        super(BitLinear158, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.randn(out_features, in_features))
+
+    def forward(self, x):
+        """
+        Forward pass through the BitLinear layer.
+
+        Args:
+            x (Tensor): Input tensor of shape (..., in_features).
+
+        Returns:
+            Tensor: Output tensor of shape (..., out_features).
+        """
+        quantized_weight = absmean(self.weight)
+        return F.linear(x, quantized_weight)
+
+    def extra_repr(self):
+        """
+        Provides additional information for debugging and logging.
+        """
+        return "in_features={}, out_features={}, quantization=ternary".format(
+            self.in_features, self.out_features
+        )
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -28,13 +92,13 @@ class LayerNorm(nn.Module):
 
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.c_attn = config.linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj = config.linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
@@ -77,11 +141,11 @@ class CausalSelfAttention(nn.Module):
 
 class MLP(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: GPTConfig):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.c_fc    = config.linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj  = config.linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -116,10 +180,15 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     space_encoding: bool = False # True to use 8192 as a sentinel to add learned space embedding to the token embeddings
+    bit_linear: bool = False # True to use BitLinear158 instead of nn.Linear
+
+    @property
+    def linear(self):
+        return BitLinear158 if self.bit_linear else nn.Linear
 
 class GPT(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
