@@ -164,6 +164,7 @@ class MultiMLP(nn.Module):
         self.pre_fc = config.linear(config.n_embd, config.n_embd, bias=config.bias)
         self.c_fc = nn.ModuleList([config.linear(features, 4 * features, bias=config.bias) for _ in range(heads)])
         self.gelu = nn.GELU()
+        self.ln = LayerNorm(features, bias=config.bias)
         self.c_proj = nn.ModuleList([config.linear(4 * features, features, bias=config.bias) for _ in range(heads)])
         self.post_fc = config.linear(config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
@@ -176,6 +177,7 @@ class MultiMLP(nn.Module):
             h = c_proj(h)
             outputs.append(h)
         output = torch.cat(outputs, dim=-1)
+        output = self.ln(output)
         output = self.post_fc(output)
         output = self.dropout(output)
         return output
