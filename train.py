@@ -236,8 +236,6 @@ def estimate_loss():
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
-            if space_encoding:
-                X = X % 8192
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
