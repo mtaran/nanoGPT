@@ -155,25 +155,28 @@ class MLP(nn.Module):
         return x
 
 class MultiMLP(nn.Module):
-    """Works like a normal MLP but with multiple heads, each with their own weights."""
+    """Works like a normal MLP but with multiple heads, each with their own weights (with pre- and post- routing)."""
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.config = config
         heads = config.n_head
         features = config.n_embd // heads
+        self.pre_fc = config.linear(config.n_embd, config.n_embd, bias=config.bias)
         self.c_fc = nn.ModuleList([config.linear(features, 4 * features, bias=config.bias) for _ in range(heads)])
         self.gelu = nn.GELU()
         self.c_proj = nn.ModuleList([config.linear(4 * features, features, bias=config.bias) for _ in range(heads)])
+        self.post_fc = config.linear(config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
         
     def forward(self, x: Tensor) -> Tensor:
         outputs = []
-        x_slices = torch.chunk(x, len(self.c_fc), dim=-1)
+        x_slices = torch.chunk(self.pre_fc(x), len(self.c_fc), dim=-1)
         for c_fc, c_proj, x_slice in zip(self.c_fc, self.c_proj, x_slices):
             h = self.gelu(c_fc(x_slice))
             h = c_proj(h)
             outputs.append(h)
         output = torch.cat(outputs, dim=-1)
+        output = self.post_fc(output)
         output = self.dropout(output)
         return output
 
