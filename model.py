@@ -368,7 +368,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     space_encoding: bool = False # True to use 8192 as a sentinel to add learned space embedding to the token embeddings
-    bit_linear: bool|int = False # True to use BitLinear158 instead of nn.Linear
+    bit_linear: int = False # 1 to use BitLinear158 instead of nn.Linear
     block_mlps: bool = False # True to use separate MLP "heads"
     nan_checks: bool = False # True to check for NaNs in the model
     mlp_factor: int = 4 # factor to increase the hidden size by in the MLPs
