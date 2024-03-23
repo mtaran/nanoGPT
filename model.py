@@ -204,6 +204,7 @@ class GPTConfig:
     space_encoding: bool = False # True to use 8192 as a sentinel to add learned space embedding to the token embeddings
     bit_linear: bool = False # True to use BitLinear158 instead of nn.Linear
     block_mlps: bool = False # True to use separate MLP "heads"
+    nan_checks: bool = False # True to check for NaNs in the model
 
     @property
     def linear(self):
@@ -276,7 +277,7 @@ class GPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb + spc_emb)
         for block in self.transformer.h:
             x2 = block(x)
-            if torch.isnan(x2).any():
+            if self.config.nan_checks and torch.isnan(x2).any():
                 raise ValueError(f"x2 is nan! max x: {x.max()}, min x: {x.min()}")
             x = x2
         x = self.transformer.ln_f(x)
@@ -284,23 +285,23 @@ class GPT(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             bottleneck = self.out_bottleneck(x) if self.config.n_outb != self.config.n_embd else x
-            if torch.isnan(bottleneck).any():
+            if self.config.nan_checks and torch.isnan(bottleneck).any():
                 raise ValueError(f"bottleneck is nan! max x: {x.max()}, min x: {x.min()}")
             logits = self.lm_head(bottleneck)
-            if torch.isnan(logits).any():
+            if self.config.nan_checks and torch.isnan(logits).any():
                 raise ValueError(f"logits is nan! max bottleneck: {bottleneck.max()}, min bottleneck: {bottleneck.min()}; max logits: {logits.max()}, min logits: {logits.min()}")
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 (targets % 8192 if self.space_embedding else targets).view(-1), ignore_index=-1,
             )
-            if math.isnan(loss):
+            if self.config.nan_checks and math.isnan(loss):
                 raise ValueError(f'loss is nan! max logits: {logits.max()}, min logits: {logits.min()}; max targets: {targets.max()}, min targets: {targets.min()}')
             if self.space_embedding:
                 space_logits = self.space_embedding(bottleneck).view(-1)
                 # print('shapes:', space_logits.shape, targets.shape, targets.view(-1).shape)
                 binary_targets = (targets >= 8192).float().view(-1)
                 space_loss = nn.BCEWithLogitsLoss()(space_logits, binary_targets)
-                if math.isnan(space_loss):
+                if self.config.nan_checks and math.isnan(space_loss):
                     raise ValueError(f'space_loss is nan! max space_logits: {space_logits.max()}, min space_logits: {space_logits.min()}; max binary_targets: {binary_targets.max()}, min binary_targets: {binary_targets.min()}')
                 loss += space_loss/12
                 logits = logits, space_logits
