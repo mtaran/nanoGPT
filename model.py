@@ -142,10 +142,10 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config: GPTConfig):
         super().__init__()
-        self.c_fc    = config.linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.c_fc    = config.linear(config.n_embd, config.mlp_factor * config.n_embd, bias=config.bias)
         self.gelu    = nn.GELU()
-        self.ln = LayerNorm(config.n_embd, bias=config.bias)
-        self.c_proj  = config.linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.ln = LayerNorm(config.n_embd * config.mlp_factor, bias=config.bias)
+        self.c_proj  = config.linear(config.mlp_factor * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -166,7 +166,7 @@ class MultiMLP(nn.Module):
         self.pre_fc = config.linear(config.n_embd, config.n_embd, bias=config.bias)
         self.c_fc = nn.ModuleList([config.linear(features, self.config.mlp_factor * features, bias=config.bias) for _ in range(heads)])
         self.gelu = nn.GELU()
-        self.ln = LayerNorm(config.n_embd, bias=config.bias)
+        self.c_ln = nn.ModuleList([LayerNorm(self.config.mlp_factor * features, bias=config.bias) for _ in range(heads)])
         self.c_proj = nn.ModuleList([config.linear(self.config.mlp_factor * features, features, bias=config.bias) for _ in range(heads)])
         self.post_fc = config.linear(config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
@@ -174,12 +174,12 @@ class MultiMLP(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         outputs = []
         x_slices = torch.chunk(self.pre_fc(x), len(self.c_fc), dim=-1)
-        for c_fc, c_proj, x_slice in zip(self.c_fc, self.c_proj, x_slices):
+        for c_fc, c_ln, c_proj, x_slice in zip(self.c_fc, self.c_ln, self.c_proj, x_slices):
             h = self.gelu(c_fc(x_slice))
+            h = c_ln(h)
             h = c_proj(h)
             outputs.append(h)
         output = torch.cat(outputs, dim=-1)
-        output = self.ln(output)
         output = self.post_fc(output)
         output = self.dropout(output)
         return output
