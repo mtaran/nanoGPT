@@ -57,6 +57,7 @@ bit_linear = 0
 block_mlps = False
 nan_checks = False
 mlp_factor = 4
+l1 = 0.0
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 space_encoding = False
@@ -161,6 +162,7 @@ model_args = dict(
     block_mlps=block_mlps,
     nan_checks=nan_checks,
     mlp_factor=mlp_factor,
+    l1=l1,
 ) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch

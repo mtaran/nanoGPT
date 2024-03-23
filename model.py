@@ -372,6 +372,7 @@ class GPTConfig:
     block_mlps: bool = False # True to use separate MLP "heads"
     nan_checks: bool = False # True to check for NaNs in the model
     mlp_factor: int = 4 # factor to increase the hidden size by in the MLPs
+    l1: float = 0.0 # L1 regularization on the weights
 
     @property
     def linear(self):
@@ -472,6 +473,12 @@ class GPT(nn.Module):
                     raise ValueError(f'space_loss is nan! max space_logits: {space_logits.max()}, min space_logits: {space_logits.min()}; max binary_targets: {binary_targets.max()}, min binary_targets: {binary_targets.min()}')
                 loss += space_loss/12
                 logits = logits, space_logits
+            if self.config.l1 > 0:
+                l1_loss = torch.tensor(0.0, device=device)
+                for name, param in self.named_parameters():
+                    if 'weight' in name:
+                        l1_loss += torch.norm(param, 1)
+                loss += self.config.l1 * l1_loss
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
