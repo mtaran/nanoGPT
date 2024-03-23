@@ -216,7 +216,7 @@ class GPTConfig:
 
     @property
     def linear(self):
-        if self.bit_linear == 1:
+        if self.bit_linear == 2:
             from bitnet import BitLinearNew
             return BitLinearNew
         elif self.bit_linear:
