@@ -162,10 +162,10 @@ class MultiMLP(nn.Module):
         heads = config.n_head
         features = config.n_embd // heads
         self.pre_fc = config.linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.c_fc = nn.ModuleList([config.linear(features, 4 * features, bias=config.bias) for _ in range(heads)])
+        self.c_fc = nn.ModuleList([config.linear(features, self.config.mlp_factor * features, bias=config.bias) for _ in range(heads)])
         self.gelu = nn.GELU()
         self.ln = LayerNorm(config.n_embd, bias=config.bias)
-        self.c_proj = nn.ModuleList([config.linear(4 * features, features, bias=config.bias) for _ in range(heads)])
+        self.c_proj = nn.ModuleList([config.linear(self.config.mlp_factor * features, features, bias=config.bias) for _ in range(heads)])
         self.post_fc = config.linear(config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
         
@@ -210,6 +210,7 @@ class GPTConfig:
     bit_linear: bool = False # True to use BitLinear158 instead of nn.Linear
     block_mlps: bool = False # True to use separate MLP "heads"
     nan_checks: bool = False # True to check for NaNs in the model
+    mlp_factor: int = 4 # factor to increase the hidden size by in the MLPs
 
     @property
     def linear(self):

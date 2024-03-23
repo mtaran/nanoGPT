@@ -56,6 +56,7 @@ n_outb = 16 # output bottleneck layer
 bit_linear = False
 block_mlps = False
 nan_checks = False
+mlp_factor = 4
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 space_encoding = False
@@ -159,6 +160,7 @@ model_args = dict(
     bit_linear=bit_linear,
     block_mlps=block_mlps,
     nan_checks=nan_checks,
+    mlp_factor=mlp_factor,
 ) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch
