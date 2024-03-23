@@ -216,7 +216,13 @@ class GPTConfig:
 
     @property
     def linear(self):
-        return BitLinear158 if self.bit_linear else nn.Linear
+        if self.bit_linear == 'new':
+            from bitnet import BitLinearNew
+            return BitLinearNew
+        elif self.bit_linear:
+            return BitLinear158
+        else:
+            return nn.Linear
 
 class GPT(nn.Module):
 
