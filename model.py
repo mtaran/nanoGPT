@@ -144,12 +144,14 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc    = config.linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.gelu    = nn.GELU()
+        self.ln = LayerNorm(config.n_embd, bias=config.bias)
         self.c_proj  = config.linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         x = self.c_fc(x)
         x = self.gelu(x)
+        x = self.ln(x)
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
