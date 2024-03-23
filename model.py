@@ -375,12 +375,7 @@ class GPTConfig:
 
     @property
     def linear(self):
-        if self.bit_linear == 2:
-            return BitLinearNew
-        elif self.bit_linear:
-            return BitLinear158
-        else:
-            return nn.Linear
+        return [nn.Linear, BitLinear158, BitLinearNew][self.bit_linear]
 
 class GPT(nn.Module):
 
